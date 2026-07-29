@@ -99,6 +99,7 @@ namespace UoFiddler.Controls.UserControls
             toolStripSeparator4 = new System.Windows.Forms.ToolStripSeparator();
             greenToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             waterToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            openingToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             statusMulti = new System.Windows.Forms.StatusStrip();
             StatusMultiText = new System.Windows.Forms.ToolStripStatusLabel();
             tabPage6 = new System.Windows.Forms.TabPage();
@@ -560,9 +561,9 @@ namespace UoFiddler.Controls.UserControls
             // 
             // contextMenuStrip1
             // 
-            contextMenuStrip1.Items.AddRange(new System.Windows.Forms.ToolStripItem[] { extractImageToolStripMenuItem, copyclipboardToolStripMenuItem1, toolStripSeparator3, toolStripMenuItemBackgound });
+            contextMenuStrip1.Items.AddRange(new System.Windows.Forms.ToolStripItem[] { extractImageToolStripMenuItem, copyclipboardToolStripMenuItem1, toolStripSeparator3, toolStripMenuItemBackgound, openingToolStripMenuItem });
             contextMenuStrip1.Name = "contextMenuStrip1";
-            contextMenuStrip1.Size = new System.Drawing.Size(175, 76);
+            contextMenuStrip1.Size = new System.Drawing.Size(175, 98);
             toolTip.SetToolTip(contextMenuStrip1, "Copied multi-graphic to clipboard.");
             // 
             // extractImageToolStripMenuItem
@@ -621,6 +622,7 @@ namespace UoFiddler.Controls.UserControls
             // toolStripMenuItemBackgound
             // 
             toolStripMenuItemBackgound.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] { backgroundOffToolStripMenuItem, toolStripSeparator4, greenToolStripMenuItem, waterToolStripMenuItem });
+            toolStripMenuItemBackgound.Image = Properties.Resources.Image;
             toolStripMenuItemBackgound.Name = "toolStripMenuItemBackgound";
             toolStripMenuItemBackgound.Size = new System.Drawing.Size(174, 22);
             toolStripMenuItemBackgound.Text = "Background Image";
@@ -629,20 +631,20 @@ namespace UoFiddler.Controls.UserControls
             // 
             backgroundOffToolStripMenuItem.Image = Properties.Resources.reload;
             backgroundOffToolStripMenuItem.Name = "backgroundOffToolStripMenuItem";
-            backgroundOffToolStripMenuItem.Size = new System.Drawing.Size(156, 22);
+            backgroundOffToolStripMenuItem.Size = new System.Drawing.Size(180, 22);
             backgroundOffToolStripMenuItem.Text = "Background off";
             backgroundOffToolStripMenuItem.Click += backgroundOffToolStripMenuItem_Click;
             // 
             // toolStripSeparator4
             // 
             toolStripSeparator4.Name = "toolStripSeparator4";
-            toolStripSeparator4.Size = new System.Drawing.Size(153, 6);
+            toolStripSeparator4.Size = new System.Drawing.Size(177, 6);
             // 
             // greenToolStripMenuItem
             // 
             greenToolStripMenuItem.Image = Properties.Resources.Help;
             greenToolStripMenuItem.Name = "greenToolStripMenuItem";
-            greenToolStripMenuItem.Size = new System.Drawing.Size(156, 22);
+            greenToolStripMenuItem.Size = new System.Drawing.Size(180, 22);
             greenToolStripMenuItem.Text = "Grass";
             greenToolStripMenuItem.Click += greenToolStripMenuItem_Click;
             // 
@@ -650,9 +652,17 @@ namespace UoFiddler.Controls.UserControls
             // 
             waterToolStripMenuItem.Image = Properties.Resources.Help;
             waterToolStripMenuItem.Name = "waterToolStripMenuItem";
-            waterToolStripMenuItem.Size = new System.Drawing.Size(156, 22);
+            waterToolStripMenuItem.Size = new System.Drawing.Size(180, 22);
             waterToolStripMenuItem.Text = "Water";
             waterToolStripMenuItem.Click += waterToolStripMenuItem_Click;
+            // 
+            // openingToolStripMenuItem
+            // 
+            openingToolStripMenuItem.Image = Properties.Resources.Add;
+            openingToolStripMenuItem.Name = "openingToolStripMenuItem";
+            openingToolStripMenuItem.Size = new System.Drawing.Size(174, 22);
+            openingToolStripMenuItem.Text = "Opening";
+            openingToolStripMenuItem.Click += openingToolStripMenuItem_Click;
             // 
             // statusMulti
             // 
@@ -807,5 +817,6 @@ namespace UoFiddler.Controls.UserControls
         private System.Windows.Forms.ToolStripMenuItem waterToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem backgroundOffToolStripMenuItem;
         private System.Windows.Forms.ToolStripSeparator toolStripSeparator4;
+        private System.Windows.Forms.ToolStripMenuItem openingToolStripMenuItem;
     }
 }

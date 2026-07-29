@@ -40,6 +40,8 @@ namespace UoFiddler.Controls.UserControls
         private PictureBox _pictureBox;
         private int _previousLineIndex = -1; // Stores the index of the previous line
 
+        private readonly HashSet<int> _hiddenComponentIndices = new HashSet<int>(); // Stores the indices of hidden components
+
         #region [ MultisControl ]
         public MultisControl()
         {
@@ -284,6 +286,8 @@ namespace UoFiddler.Controls.UserControls
         #region [ AfterSelect_Multi ]
         private void AfterSelect_Multi(object sender, TreeViewEventArgs e)
         {
+            _hiddenComponentIndices.Clear();
+
             MultiComponentList multi = (MultiComponentList)TreeViewMulti.SelectedNode.Tag;
             if (multi == MultiComponentList.Empty)
             {
@@ -299,6 +303,13 @@ namespace UoFiddler.Controls.UserControls
                 StatusMultiText.Text =
                     $"Size: {multi.Width},{multi.Height} MaxHeight: {multi.MaxHeight} MultiRegion: {multi.Min.X},{multi.Min.Y},{multi.Max.X},{multi.Max.Y} Surface: {multi.Surface}";
             }
+
+            // <-- hier einfügen
+            if (_componentToggleForm != null && _componentToggleForm.Visible)
+            {
+                PopulateComponentToggleList(multi);
+            }
+
             ChangeComponentList(multi);
             MultiPictureBox.Invalidate();
         }
@@ -318,7 +329,10 @@ namespace UoFiddler.Controls.UserControls
                 return;
             }
             int h = HeightChangeMulti.Maximum - HeightChangeMulti.Value;
-            Bitmap mMainPictureMulti = ((MultiComponentList)TreeViewMulti.SelectedNode.Tag).GetImage(h);
+            //Bitmap mMainPictureMulti = ((MultiComponentList)TreeViewMulti.SelectedNode.Tag).GetImage(h);
+
+            Bitmap mMainPictureMulti = GetImageWithHiddenComponents((MultiComponentList)TreeViewMulti.SelectedNode.Tag, h);
+
             if (mMainPictureMulti == null)
             {
                 e.Graphics.Clear(Color.White);
@@ -1588,6 +1602,247 @@ namespace UoFiddler.Controls.UserControls
         private void backgroundOffToolStripMenuItem_Click(object sender, EventArgs e)
         {
             MultiPictureBox.BackgroundImage = null;
+        }
+        #endregion
+
+        #region [ GetImageWithHiddenComponents ]
+        private Bitmap GetImageWithHiddenComponents(MultiComponentList multi, int maximumHeight)
+        {
+            if (multi == null || multi == MultiComponentList.Empty || multi.Width == 0 || multi.Height == 0)
+            {
+                return null;
+            }
+
+            int xMin = 1000, yMin = 1000;
+            int xMax = -1000, yMax = -1000;
+
+            // Bounding Box immer über ALLE Komponenten, sonst "springt" das Bild beim Toggle
+            for (int x = 0; x < multi.Width; ++x)
+            {
+                for (int y = 0; y < multi.Height; ++y)
+                {
+                    foreach (var mTile in multi.Tiles[x][y])
+                    {
+                        Bitmap bmp = Art.GetStatic(mTile.Id);
+                        if (bmp == null)
+                        {
+                            continue;
+                        }
+
+                        int px = (x - y) * 22;
+                        int py = (x + y) * 22;
+
+                        px -= bmp.Width / 2;
+                        py -= mTile.Z << 2;
+                        py -= bmp.Height;
+
+                        if (px < xMin) xMin = px;
+                        if (py < yMin) yMin = py;
+
+                        px += bmp.Width;
+                        py += bmp.Height;
+
+                        if (px > xMax) xMax = px;
+                        if (py > yMax) yMax = py;
+                    }
+                }
+            }
+
+            if (xMax <= xMin || yMax <= yMin)
+            {
+                return null;
+            }
+
+            var canvas = new Bitmap(xMax - xMin, yMax - yMin);
+            using (Graphics gfx = Graphics.FromImage(canvas))
+            {
+                gfx.Clear(Color.Transparent);
+
+                int componentIndex = 0;
+                for (int x = 0; x < multi.Width; ++x)
+                {
+                    for (int y = 0; y < multi.Height; ++y)
+                    {
+                        foreach (var mTile in multi.Tiles[x][y])
+                        {
+                            int currentIndex = componentIndex++;
+
+                            if (_hiddenComponentIndices.Contains(currentIndex))
+                            {
+                                continue; // ausgeblendet
+                            }
+
+                            if (mTile.Z > maximumHeight)
+                            {
+                                continue;
+                            }
+
+                            Bitmap bmp = Art.GetStatic(mTile.Id);
+                            if (bmp == null)
+                            {
+                                continue;
+                            }
+
+                            int px = (x - y) * 22;
+                            int py = (x + y) * 22;
+
+                            px -= bmp.Width / 2;
+                            py -= mTile.Z << 2;
+                            py -= bmp.Height;
+                            px -= xMin;
+                            py -= yMin;
+
+                            gfx.DrawImageUnscaled(bmp, px, py, bmp.Width, bmp.Height);
+                        }
+                    }
+                }
+            }
+
+            return canvas;
+        }
+        #endregion
+
+
+        #region [ Component Visibility Toggle ]
+        private Form _componentToggleForm;
+        private CheckedListBox _componentToggleListBox;
+
+        private void CreateComponentToggleForm()
+        {
+            _componentToggleListBox = new CheckedListBox
+            {
+                Dock = DockStyle.Fill,
+                CheckOnClick = true,
+                IntegralHeight = false
+            };
+            _componentToggleListBox.ItemCheck += ComponentToggleListBox_ItemCheck;
+
+            var showAllButton = new Button
+            {
+                Text = "Alle anzeigen",
+                Dock = DockStyle.Bottom,
+                Height = 28
+            };
+            showAllButton.Click += (s, e) =>
+            {
+                _hiddenComponentIndices.Clear();
+                for (int i = 0; i < _componentToggleListBox.Items.Count; ++i)
+                {
+                    _componentToggleListBox.SetItemChecked(i, true);
+                }
+                MultiPictureBox.Invalidate();
+            };
+
+            _componentToggleForm = new Form
+            {
+                Text = "Graphics ein-/ausblenden",
+                StartPosition = FormStartPosition.Manual,
+                ShowInTaskbar = false,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                Size = new Size(280, 400)
+            };
+            _componentToggleForm.Controls.Add(_componentToggleListBox);
+            _componentToggleForm.Controls.Add(showAllButton);
+
+            // Beim Schließen (X-Button) nur verstecken, nicht zerstören -> Position bleibt erhalten
+            _componentToggleForm.FormClosing += (s, e) =>
+            {
+                if (e.CloseReason == CloseReason.UserClosing)
+                {
+                    e.Cancel = true;
+                    _componentToggleForm.Hide();
+                }
+            };
+        }
+
+        private void PopulateComponentToggleList(MultiComponentList multi)
+        {
+            _componentToggleListBox.BeginUpdate();
+            _componentToggleListBox.Items.Clear();
+
+            int componentIndex = 0;
+            for (int x = 0; x < multi.Width; ++x)
+            {
+                for (int y = 0; y < multi.Height; ++y)
+                {
+                    foreach (var mTile in multi.Tiles[x][y])
+                    {
+                        bool visible = !_hiddenComponentIndices.Contains(componentIndex);
+                        // Add(item, isChecked) löst KEIN ItemCheck aus -> kein Extra-Handling nötig
+                        _componentToggleListBox.Items.Add($"0x{mTile.Id:X4}  X:{x} Y:{y} Z:{mTile.Z}", visible);
+                        componentIndex++;
+                    }
+                }
+            }
+
+            _componentToggleListBox.EndUpdate();
+            _componentToggleForm.Text = $"Graphics ein-/ausblenden ({componentIndex} gesamt)";
+        }
+
+        private void ComponentToggleListBox_ItemCheck(object sender, ItemCheckEventArgs e)
+        {
+            int index = e.Index;
+            bool willBeVisible = e.NewValue == CheckState.Checked;
+
+            if (willBeVisible)
+            {
+                _hiddenComponentIndices.Remove(index);
+            }
+            else
+            {
+                _hiddenComponentIndices.Add(index);
+            }
+
+            MultiPictureBox.Invalidate();
+        }
+
+        private void openingToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            if (TreeViewMulti.SelectedNode == null)
+            {
+                return;
+            }
+
+            MultiComponentList multi = (MultiComponentList)TreeViewMulti.SelectedNode.Tag;
+            if (multi == MultiComponentList.Empty)
+            {
+                return;
+            }
+
+            bool firstShow = _componentToggleForm == null || _componentToggleForm.IsDisposed;
+            if (firstShow)
+            {
+                CreateComponentToggleForm();
+            }
+
+            PopulateComponentToggleList(multi);
+
+            if (firstShow)
+            {
+                // Erstes Öffnen: rechts neben dem Bild positionieren, nicht drüber
+                Point anchor = MultiPictureBox.PointToScreen(new Point(MultiPictureBox.Width + 4, 0));
+                _componentToggleForm.Location = anchor;
+            }
+
+            _componentToggleForm.Show(FindForm());
+            _componentToggleForm.BringToFront();
+        }
+
+        private void ToggleComponentVisibility_Click(object sender, EventArgs e)
+        {
+            if (!(sender is ToolStripMenuItem item) || !(item.Tag is int index))
+            {
+                return;
+            }
+
+            if (!_hiddenComponentIndices.Add(index))
+            {
+                _hiddenComponentIndices.Remove(index);
+            }
+
+            item.Checked = !_hiddenComponentIndices.Contains(index);
+            MultiPictureBox.Invalidate();
         }
         #endregion
     }
