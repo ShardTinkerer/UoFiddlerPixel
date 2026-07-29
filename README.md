@@ -20,7 +20,8 @@ Version: 4.12.11
 - Added diff statistics to the top toolbar  
 - Added manual zoom via text input  
 - Introduced modern dark UI  
-- `OnPaint` now clamps block coordinates to map bounds  
+- `OnPaint` now clamps block coordinates to map bounds
+- List components that can be shown, hidden, or toggled open.
 
 - `CalculateDiffs` now uses `Math.Min` for map dimensions to avoid out‑of‑range errors  
 - Replaced `bool[][][][]` with `HashSet<Point>` for block‑ and tile‑level caching → ~90% less RAM, O(1) tile lookup  
