@@ -1846,7 +1846,7 @@ namespace UoFiddler.Controls.UserControls
             var splitContainer = new SplitContainer
             {
                 Dock = DockStyle.Fill,
-                SplitterDistance = 300
+                SplitterDistance = 300 // Initial width of the left panel
             };
             _componentToggleSplitContainer = splitContainer;
             splitContainer.Panel1.Controls.Add(leftPanel);
