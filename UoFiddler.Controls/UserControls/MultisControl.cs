@@ -16,6 +16,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Linq;
 using System.Windows.Forms;
 using System.Xml;
 using Ultima;
@@ -33,14 +34,34 @@ namespace UoFiddler.Controls.UserControls
         //private readonly XmlElement _xmlElementMultis;
         private XmlElement _xmlElementMultis; // Readonly removed
 
-        private int selectedId;
-        private string selectedMultiName;
+        private int selectedId; // Stores the ID of the selected multi
+        private string selectedMultiName; // Stores the name of the selected multi
         private int selectedMultiType;
 
         private PictureBox _pictureBox;
         private int _previousLineIndex = -1; // Stores the index of the previous line
 
         private readonly HashSet<int> _hiddenComponentIndices = new HashSet<int>(); // Stores the indices of hidden components
+
+        private List<MultiComponentList.MultiTileEntry> _workingTiles;
+        private int _sourceMultiId; // Stores the ID of the source multi for working tiles
+        private ushort? _graphicClipboard; // Stores the graphic ID of the copied component
+
+        private TextBox searchTextBox; // TextBox for searching components
+        private PictureBox previewPictureBox; // PictureBox for previewing components
+        private TextBox hexIdTextBox; // TextBox for displaying the hex ID of the selected component
+        private PictureBox hexPreviewPictureBox; // PictureBox for previewing the hex ID of the selected component
+        private TextBox targetIdTextBox; // TextBox for displaying the target ID of the selected component
+
+        private readonly Stack<(int index, ushort previousItemId)> _undoStack = new Stack<(int, ushort)>(); // Stack for undo functionality
+
+        private PictureBox referencePreviewPictureBox; // PictureBox for previewing the reference component
+        private CheckBox blackTransparentCheckBox; // CheckBox for enabling/disabling black transparency
+        private CheckBox whiteTransparentCheckBox; // CheckBox for enabling/disabling white transparency
+        private Bitmap _referenceBitmapRaw; // Stores the raw bitmap of the reference component
+        private SplitContainer _componentToggleSplitContainer; // SplitContainer for the component toggle layout
+        private static readonly string _componentToggleLayoutFile =
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "GraphicsEditorLayout.xml"); // File path for saving the component toggle layout
 
         #region [ MultisControl ]
         public MultisControl()
@@ -77,11 +98,20 @@ namespace UoFiddler.Controls.UserControls
         }
         #endregion
 
-        private bool _loaded;
-        private bool _showFreeSlots;
-        private readonly MultisControl _refMarker;
-        private Color _backgroundImageColor = Color.White;
-        private bool _useTransparencyForPng = true;
+        #region [ ComponentListEntry ] // Helper class to represent a component entry in the list
+        private sealed class ComponentListEntry
+        {
+            public int Index { get; set; }
+            public string Label { get; set; }
+            public override string ToString() => Label;
+        }
+        #endregion
+
+        private bool _loaded; // Flag to indicate if the control has been loaded
+        private bool _showFreeSlots; // Flag to indicate if free slots should be shown in the TreeView
+        private readonly MultisControl _refMarker; // Reference to the current instance of the MultisControl
+        private Color _backgroundImageColor = Color.White; // Background color for exported images
+        private bool _useTransparencyForPng = true; // Flag to indicate if transparency should be used for PNG exports
 
         #region [ Reload ]
         /// <summary>
@@ -305,9 +335,12 @@ namespace UoFiddler.Controls.UserControls
             }
 
             // <-- hier einfügen
-            if (_componentToggleForm != null && _componentToggleForm.Visible)
+            if (_componentToggleForm != null && _componentToggleForm.Visible && multi != MultiComponentList.Empty)
             {
-                PopulateComponentToggleList(multi);
+                // Beim Multi-Wechsel muss auch die Arbeitskopie neu geladen werden, sonst zeigt der Editor die alte Multi
+                _sourceMultiId = int.Parse(TreeViewMulti.SelectedNode.Name);
+                _workingTiles = multi.SortedTiles.ToList();
+                PopulateComponentToggleList(searchTextBox.Text);
             }
 
             ChangeComponentList(multi);
@@ -329,9 +362,12 @@ namespace UoFiddler.Controls.UserControls
                 return;
             }
             int h = HeightChangeMulti.Maximum - HeightChangeMulti.Value;
-            //Bitmap mMainPictureMulti = ((MultiComponentList)TreeViewMulti.SelectedNode.Tag).GetImage(h);
 
-            Bitmap mMainPictureMulti = GetImageWithHiddenComponents((MultiComponentList)TreeViewMulti.SelectedNode.Tag, h);
+            var tiles = (_workingTiles != null && _componentToggleForm != null && _componentToggleForm.Visible)
+                ? _workingTiles
+                : ((MultiComponentList)TreeViewMulti.SelectedNode.Tag).SortedTiles.ToList();
+            
+            Bitmap mMainPictureMulti = RenderMultiImage(tiles, h); // Render the multi image based on the selected tiles and height
 
             if (mMainPictureMulti == null)
             {
@@ -1704,8 +1740,8 @@ namespace UoFiddler.Controls.UserControls
 
 
         #region [ Component Visibility Toggle ]
-        private Form _componentToggleForm;
-        private CheckedListBox _componentToggleListBox;
+        private Form _componentToggleForm; // Form for toggling component visibility
+        private CheckedListBox _componentToggleListBox; // CheckedListBox for component visibility
 
         private void CreateComponentToggleForm()
         {
@@ -1716,87 +1752,595 @@ namespace UoFiddler.Controls.UserControls
                 IntegralHeight = false
             };
             _componentToggleListBox.ItemCheck += ComponentToggleListBox_ItemCheck;
+            _componentToggleListBox.SelectedIndexChanged += ComponentToggleListBox_SelectedIndexChanged;
 
-            var showAllButton = new Button
-            {
-                Text = "Alle anzeigen",
-                Dock = DockStyle.Bottom,
-                Height = 28
-            };
+            searchTextBox = new TextBox { Dock = DockStyle.Top };
+            searchTextBox.TextChanged += SearchTextBox_TextChanged;
+
+            var leftPanel = new Panel { Dock = DockStyle.Fill };
+            leftPanel.Controls.Add(_componentToggleListBox);
+            leftPanel.Controls.Add(searchTextBox);
+
+            // --- Bearbeiten ---
+            previewPictureBox = new PictureBox { Size = new Size(64, 64), BorderStyle = BorderStyle.FixedSingle, SizeMode = PictureBoxSizeMode.Zoom };
+            hexIdTextBox = new TextBox { Width = 100 };
+            hexIdTextBox.TextChanged += HexIdTextBox_TextChanged;
+            hexPreviewPictureBox = new PictureBox { Size = new Size(64, 64), BorderStyle = BorderStyle.FixedSingle, SizeMode = PictureBoxSizeMode.Zoom };
+
+            var applyHexButton = new Button { Text = "Anwenden", AutoSize = true };
+            applyHexButton.Click += ApplyHexIdButton_Click;
+
+            var copyButton = new Button { Text = "Kopieren", AutoSize = true };
+            copyButton.Click += CopyGraphicButton_Click;
+
+            var pasteButton = new Button { Text = "Einfügen", AutoSize = true };
+            pasteButton.Click += PasteGraphicButton_Click;
+
+            var undoButton = new Button { Text = "Rückgängig", AutoSize = true };
+            undoButton.Click += UndoButton_Click;
+
+            var showAllButton = new Button { Text = "Alle anzeigen", AutoSize = true };
             showAllButton.Click += (s, e) =>
             {
                 _hiddenComponentIndices.Clear();
-                for (int i = 0; i < _componentToggleListBox.Items.Count; ++i)
-                {
-                    _componentToggleListBox.SetItemChecked(i, true);
-                }
+                PopulateComponentToggleList(searchTextBox.Text);
                 MultiPictureBox.Invalidate();
             };
 
+            // --- Reference image (display only; not saved anywhere) ---
+            referencePreviewPictureBox = new PictureBox
+            {
+                Size = new Size(96, 96),
+                BorderStyle = BorderStyle.FixedSingle,
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = Color.Gray // so that hidden (transparent) areas are visible, instead of disappearing against a white background
+            };
+
+            var loadFromFileButton = new Button { Text = "Von Datei..", AutoSize = true };
+            loadFromFileButton.Click += LoadReferenceFromFileButton_Click;
+
+            var loadFromClipboardButton = new Button { Text = "Aus Zwischenablage", AutoSize = true };
+            loadFromClipboardButton.Click += LoadReferenceFromClipboardButton_Click;
+
+            blackTransparentCheckBox = new CheckBox { Text = "Schwarz ausblenden", AutoSize = true };
+            blackTransparentCheckBox.CheckedChanged += (s, e) => UpdateReferencePreview();
+
+            whiteTransparentCheckBox = new CheckBox { Text = "Weiß ausblenden", AutoSize = true };
+            whiteTransparentCheckBox.CheckedChanged += (s, e) => UpdateReferencePreview();
+
+            // --- Speichern/Export ---
+            targetIdTextBox = new TextBox { Width = 100 };
+
+            var saveAsIdButton = new Button { Text = "Speichern als ID", AutoSize = true };
+            saveAsIdButton.Click += SaveAsIdButton_Click;
+
+            var exportButton = new Button { Text = "Export..", AutoSize = true };
+            exportButton.Click += ExportSettingsButton_Click;
+
+            var importButton = new Button { Text = "Import..", AutoSize = true };
+            importButton.Click += ImportSettingsButton_Click;
+
+            var rightPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoScroll = true,
+                Padding = new Padding(8)
+            };
+
+            rightPanel.Controls.Add(BuildRow("Aktuell:", previewPictureBox));
+            rightPanel.Controls.Add(BuildRow("Hex-ID:", hexIdTextBox));
+            rightPanel.Controls.Add(BuildRow("Vorschau:", hexPreviewPictureBox));
+            rightPanel.Controls.Add(BuildButtonRow(applyHexButton, copyButton, pasteButton, undoButton, showAllButton));
+
+            rightPanel.Controls.Add(new Label { Text = "— Referenzbild (nur Vorschau, wird nicht gespeichert) —", AutoSize = true, Margin = new Padding(0, 14, 0, 4) });
+            rightPanel.Controls.Add(BuildRow("", referencePreviewPictureBox));
+            rightPanel.Controls.Add(BuildButtonRow(loadFromFileButton, loadFromClipboardButton));
+            rightPanel.Controls.Add(BuildButtonRow(blackTransparentCheckBox, whiteTransparentCheckBox));
+
+            rightPanel.Controls.Add(new Label { Text = "— Speichern —", AutoSize = true, Margin = new Padding(0, 14, 0, 4) });
+            rightPanel.Controls.Add(BuildRow("Ziel-ID:", targetIdTextBox));
+            rightPanel.Controls.Add(BuildButtonRow(saveAsIdButton, exportButton, importButton));
+
+            var splitContainer = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                SplitterDistance = 300
+            };
+            _componentToggleSplitContainer = splitContainer;
+            splitContainer.Panel1.Controls.Add(leftPanel);
+            splitContainer.Panel2.Controls.Add(rightPanel);
+
             _componentToggleForm = new Form
             {
-                Text = "Graphics ein-/ausblenden",
+                Text = "Graphics-Editor",
                 StartPosition = FormStartPosition.Manual,
                 ShowInTaskbar = false,
                 MinimizeBox = false,
-                MaximizeBox = false,
-                Size = new Size(280, 400)
+                MaximizeBox = true,
+                FormBorderStyle = FormBorderStyle.Sizable,
+                MinimumSize = new Size(640, 480),
+                Size = new Size(720, 600)
             };
-            _componentToggleForm.Controls.Add(_componentToggleListBox);
-            _componentToggleForm.Controls.Add(showAllButton);
+            _componentToggleForm.Controls.Add(splitContainer);
 
-            // Beim Schließen (X-Button) nur verstecken, nicht zerstören -> Position bleibt erhalten
+            if (TryLoadComponentToggleLayout(out Rectangle savedBounds, out int savedSplitterDistance))
+            {
+                _componentToggleForm.StartPosition = FormStartPosition.Manual;
+                _componentToggleForm.Bounds = savedBounds;
+                if (savedSplitterDistance > 0)
+                {
+                    try
+                    {
+                        splitContainer.SplitterDistance = savedSplitterDistance;
+                    }
+                    catch (ArgumentOutOfRangeException)
+                    {
+                    }
+                }
+            }
+            else
+            {
+                Point anchor = MultiPictureBox.PointToScreen(new Point(MultiPictureBox.Width + 4, 0));
+                _componentToggleForm.Location = anchor;
+            }
+            
+            _componentToggleForm.ResizeEnd += (s, e) => SaveComponentToggleLayout();
+            splitContainer.SplitterMoved += (s, e) => SaveComponentToggleLayout();
+
             _componentToggleForm.FormClosing += (s, e) =>
             {
                 if (e.CloseReason == CloseReason.UserClosing)
                 {
                     e.Cancel = true;
+                    SaveComponentToggleLayout();
                     _componentToggleForm.Hide();
                 }
             };
         }
+        #endregion
 
-        private void PopulateComponentToggleList(MultiComponentList multi)
+        #region [ SaveComponentToggleLayout ]
+        private void SaveComponentToggleLayout() // "nice to have" – an error here should not prevent closing
         {
+            try
+            {
+                using (var writer = XmlWriter.Create(_componentToggleLayoutFile, new XmlWriterSettings { Indent = true }))
+                {
+                    writer.WriteStartDocument();
+                    writer.WriteStartElement("Layout");
+                    writer.WriteAttributeString("X", _componentToggleForm.Location.X.ToString());
+                    writer.WriteAttributeString("Y", _componentToggleForm.Location.Y.ToString());
+                    writer.WriteAttributeString("Width", _componentToggleForm.Width.ToString());
+                    writer.WriteAttributeString("Height", _componentToggleForm.Height.ToString());
+                    writer.WriteAttributeString("SplitterDistance", _componentToggleSplitContainer.SplitterDistance.ToString());
+                    writer.WriteEndElement();
+                    writer.WriteEndDocument();
+                }
+            }
+            catch
+            {
+                // Saving the layout is "nice to have" – an error here should not prevent closing.
+            }
+        }
+        #endregion
+
+        #region [ TryLoadComponentToggleLayout ] 
+        private bool TryLoadComponentToggleLayout(out Rectangle bounds, out int splitterDistance)
+        {
+            bounds = Rectangle.Empty;
+            splitterDistance = -1;
+
+            if (!File.Exists(_componentToggleLayoutFile))
+            {
+                return false;
+            }
+
+            try
+            {
+                var doc = new XmlDocument();
+                doc.Load(_componentToggleLayoutFile);
+                XmlNode node = doc.SelectSingleNode("/Layout");
+                if (node == null)
+                {
+                    return false;
+                }
+
+                int x = GetIntAttribute(node, "X", 0);
+                int y = GetIntAttribute(node, "Y", 0);
+                int width = GetIntAttribute(node, "Width", 720);
+                int height = GetIntAttribute(node, "Height", 600);
+                splitterDistance = GetIntAttribute(node, "SplitterDistance", -1);
+
+                bounds = new Rectangle(x, y, width, height);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+        #endregion
+
+        #region [ GetIntAttribute ]
+        private static int GetIntAttribute(XmlNode node, string name, int defaultValue)
+        {
+            var attr = node.Attributes?[name];
+            if (attr == null || !int.TryParse(attr.Value, out int value))
+            {
+                return defaultValue;
+            }
+            return value;
+        }
+        #endregion
+
+        #region [ FlowLayoutPanel BuildRow ]
+        private static FlowLayoutPanel BuildRow(string labelText, Control control)
+        {
+            var row = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                WrapContents = false,
+                Margin = new Padding(0, 4, 0, 4)
+            };
+
+            if (!string.IsNullOrEmpty(labelText))
+            {
+                row.Controls.Add(new Label { Text = labelText, AutoSize = true, Margin = new Padding(0, 6, 6, 0) });
+            }
+
+            row.Controls.Add(control);
+            return row;
+        }
+        #endregion
+
+        #region [ FlowLayoutPanel BuildButtonRow ]
+        private static FlowLayoutPanel BuildButtonRow(params Control[] controls)
+        {
+            var row = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                WrapContents = true,
+                MaximumSize = new Size(320, 0),
+                Margin = new Padding(0, 2, 0, 2)
+            };
+
+            foreach (var c in controls)
+            {
+                row.Controls.Add(c);
+            }
+
+            return row;
+        }
+        #endregion
+
+        #region [ SetTileGraphic ] // Sets the graphic of a tile and updates the display.
+        private void SetTileGraphic(int index, ushort newItemId)
+        {
+            if (index < 0 || index >= _workingTiles.Count)
+            {
+                return;
+            }
+
+            var entry = _workingTiles[index];
+            entry.ItemId = newItemId;
+            _workingTiles[index] = entry;
+
+            MultiPictureBox.Invalidate();
+            PopulateComponentToggleList(searchTextBox.Text);
+            ReselectComponent(index);
+        }
+        #endregion
+
+        #region [ ApplyGraphicToPosition ] // Applies a new graphic to a specific position and saves the previous state for undo.
+        private void ApplyGraphicToPosition(int index, ushort newItemId)
+        {
+            if (index < 0 || index >= _workingTiles.Count)
+            {
+                return;
+            }
+
+            _undoStack.Push((index, _workingTiles[index].ItemId)); // Save the old value before the change.
+            SetTileGraphic(index, newItemId); // Update the graphic at the specified index.
+        }
+        #endregion
+
+        #region [ UndoButton_Click ] // Handles the undo action by restoring the previous graphic state.
+        private void UndoButton_Click(object sender, EventArgs e)
+        {
+            if (_undoStack.Count == 0)
+            {
+                MessageBox.Show("Nichts zum Rückgängigmachen.", "Hinweis", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var (index, previousItemId) = _undoStack.Pop();
+            SetTileGraphic(index, previousItemId); // kein erneutes Pushen auf den Stack!
+        }
+        #endregion
+
+        #region [ ReselectComponent ] // Reselects a component in the list box based on its index.
+        private void ReselectComponent(int index)
+        {
+            for (int i = 0; i < _componentToggleListBox.Items.Count; ++i)
+            {
+                if (_componentToggleListBox.Items[i] is ComponentListEntry entry && entry.Index == index)
+                {
+                    _componentToggleListBox.SelectedIndex = i;
+                    break;
+                }
+            }
+        }
+        #endregion
+
+        #region [ LoadReferenceFromFileButton_Click and LoadReferenceFromClipboardButton_Click ] // Loads a reference image from a file or clipboard.
+        private void LoadReferenceFromFileButton_Click(object sender, EventArgs e)
+        {
+            using (var dialog = new OpenFileDialog { Filter = "Bilder|*.bmp;*.png;*.jpg;*.jpeg;*.gif" })
+            {
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    _referenceBitmapRaw?.Dispose();
+                    _referenceBitmapRaw = new Bitmap(dialog.FileName);
+                    UpdateReferencePreview();
+                }
+            }
+        }
+
+        private void LoadReferenceFromClipboardButton_Click(object sender, EventArgs e)
+        {
+            if (!Clipboard.ContainsImage())
+            {
+                MessageBox.Show("Kein Bild in der Zwischenablage.", "Hinweis", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            _referenceBitmapRaw?.Dispose();
+            _referenceBitmapRaw = new Bitmap(Clipboard.GetImage());
+            UpdateReferencePreview();
+        }
+        #endregion
+
+        #region 
+        private void UpdateReferencePreview()
+        {
+            if (_referenceBitmapRaw == null)
+            {
+                referencePreviewPictureBox.Image = null;
+                return;
+            }
+
+            // For display purposes only: create a copy; the original remains unchanged.
+            var display = new Bitmap(_referenceBitmapRaw);
+
+            if (blackTransparentCheckBox.Checked)
+            {
+                display.MakeTransparent(Color.Black);
+            }
+
+            if (whiteTransparentCheckBox.Checked)
+            {
+                display.MakeTransparent(Color.White);
+            }
+
+            referencePreviewPictureBox.Image?.Dispose();
+            referencePreviewPictureBox.Image = display;
+        }
+        #endregion
+
+        #region [ PopulateComponentToggleList ] // Populates the component toggle list based on the current working tiles and filter.
+        private void PopulateComponentToggleList(string filter = "")
+        {
+            filter = filter?.Trim() ?? string.Empty;
+
             _componentToggleListBox.BeginUpdate();
             _componentToggleListBox.Items.Clear();
 
-            int componentIndex = 0;
-            for (int x = 0; x < multi.Width; ++x)
+            for (int i = 0; i < _workingTiles.Count; ++i)
             {
-                for (int y = 0; y < multi.Height; ++y)
+                var entry = _workingTiles[i];
+                string label = $"[{i}] 0x{entry.ItemId:X4}  X:{entry.OffsetX} Y:{entry.OffsetY} Z:{entry.OffsetZ}";
+
+                if (filter.Length > 0 && label.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
                 {
-                    foreach (var mTile in multi.Tiles[x][y])
-                    {
-                        bool visible = !_hiddenComponentIndices.Contains(componentIndex);
-                        // Add(item, isChecked) löst KEIN ItemCheck aus -> kein Extra-Handling nötig
-                        _componentToggleListBox.Items.Add($"0x{mTile.Id:X4}  X:{x} Y:{y} Z:{mTile.Z}", visible);
-                        componentIndex++;
-                    }
+                    continue;
                 }
+
+                bool visible = !_hiddenComponentIndices.Contains(i);
+                _componentToggleListBox.Items.Add(new ComponentListEntry { Index = i, Label = label }, visible);
             }
 
             _componentToggleListBox.EndUpdate();
-            _componentToggleForm.Text = $"Graphics ein-/ausblenden ({componentIndex} gesamt)";
+            _componentToggleForm.Text = $"Graphics-Editor ({_workingTiles.Count} gesamt)";
         }
+        #endregion
+
+        #region [ SearchTextBox_TextChanged and ComponentToggleListBox Events ] // Handles search filtering and component selection.
+        private void SearchTextBox_TextChanged(object sender, EventArgs e)
+        {
+            PopulateComponentToggleList(searchTextBox.Text);
+        }        
 
         private void ComponentToggleListBox_ItemCheck(object sender, ItemCheckEventArgs e)
         {
-            int index = e.Index;
+            var entry = (ComponentListEntry)_componentToggleListBox.Items[e.Index];
             bool willBeVisible = e.NewValue == CheckState.Checked;
 
             if (willBeVisible)
             {
-                _hiddenComponentIndices.Remove(index);
+                _hiddenComponentIndices.Remove(entry.Index);
             }
             else
             {
-                _hiddenComponentIndices.Add(index);
+                _hiddenComponentIndices.Add(entry.Index);
             }
 
             MultiPictureBox.Invalidate();
         }
+        #endregion
 
+        #region [ ComponentToggleListBox_SelectedIndexChanged ] // Updates the preview image when a different component is selected.
+        private void ComponentToggleListBox_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (!(_componentToggleListBox.SelectedItem is ComponentListEntry entry))
+            {
+                previewPictureBox.Image = null;
+                return;
+            }
+
+            previewPictureBox.Image = Art.GetStatic(_workingTiles[entry.Index].ItemId);
+        }
+        #endregion
+
+        #region [ ApplyHexIdButton_Click and HexIdTextBox_TextChanged ] // Applies a new hex ID to the selected component and updates the preview.
+        private void ApplyHexIdButton_Click(object sender, EventArgs e)
+        {
+            if (!(_componentToggleListBox.SelectedItem is ComponentListEntry entry))
+            {
+                return;
+            }
+
+            string text = hexIdTextBox.Text.Trim().Replace("0x", "");
+            if (!ushort.TryParse(text, System.Globalization.NumberStyles.HexNumber, null, out ushort newId))
+            {
+                MessageBox.Show("Ungültige Hex-ID.", "Fehler", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            ApplyGraphicToPosition(entry.Index, newId);
+        }
+        #endregion
+
+        #region [ HexIdTextBox_TextChanged ] // Updates the preview image based on the hex ID entered in the text box, providing a live preview before applying changes.        
+        private void HexIdTextBox_TextChanged(object sender, EventArgs e)
+        {
+            string text = hexIdTextBox.Text.Trim().Replace("0x", "");
+            hexPreviewPictureBox.Image = ushort.TryParse(text, System.Globalization.NumberStyles.HexNumber, null, out ushort id)
+                ? Art.GetStatic(id)
+                : null;
+        }
+        #endregion
+
+        #region [ CopyGraphicButton_Click and PasteGraphicButton_Click ] // Handles copying and pasting graphics between components.
+        private void CopyGraphicButton_Click(object sender, EventArgs e)
+        {
+            if (!(_componentToggleListBox.SelectedItem is ComponentListEntry entry))
+            {
+                return;
+            }
+
+            _graphicClipboard = _workingTiles[entry.Index].ItemId;
+            hexIdTextBox.Text = $"{_graphicClipboard:X4}"; // löst HexIdTextBox_TextChanged aus -> Vorschau aktualisiert sich automatisch
+        }
+
+        private void PasteGraphicButton_Click(object sender, EventArgs e)
+        {
+            if (_graphicClipboard == null || !(_componentToggleListBox.SelectedItem is ComponentListEntry entry))
+            {
+                return;
+            }
+
+            hexIdTextBox.Text = $"{_graphicClipboard:X4}"; // Vorschau zeigt immer, was gerade eingefügt wird
+            ApplyGraphicToPosition(entry.Index, _graphicClipboard.Value);
+        }
+        #endregion
+
+        #region [ ExportComponentSettings and ImportComponentSettings ] // Exports and imports component settings to/from an XML file.
+        private void ExportComponentSettings(string fileName)
+        {
+            using (var writer = XmlWriter.Create(fileName, new XmlWriterSettings { Indent = true }))
+            {
+                writer.WriteStartDocument();
+                writer.WriteStartElement("MultiComponentSettings");
+                writer.WriteAttributeString("SourceId", _sourceMultiId.ToString());
+
+                foreach (var entry in _workingTiles)
+                {
+                    writer.WriteStartElement("Item");
+                    writer.WriteAttributeString("Id", $"0x{entry.ItemId:X4}");
+                    writer.WriteAttributeString("X", entry.OffsetX.ToString());
+                    writer.WriteAttributeString("Y", entry.OffsetY.ToString());
+                    writer.WriteAttributeString("Z", entry.OffsetZ.ToString());
+                    writer.WriteAttributeString("Flags", entry.Flags.ToString());
+                    writer.WriteEndElement();
+                }
+
+                writer.WriteStartElement("Hidden");
+                foreach (int index in _hiddenComponentIndices)
+                {
+                    writer.WriteElementString("Index", index.ToString());
+                }
+                writer.WriteEndElement();
+
+                writer.WriteEndElement();
+                writer.WriteEndDocument();
+            }
+        }
+
+        private void ImportComponentSettings(string fileName)
+        {
+            var doc = new XmlDocument();
+            doc.Load(fileName);
+
+            var newTiles = new List<MultiComponentList.MultiTileEntry>();
+            foreach (XmlNode node in doc.SelectNodes("/MultiComponentSettings/Item"))
+            {
+                newTiles.Add(new MultiComponentList.MultiTileEntry
+                {
+                    ItemId = Convert.ToUInt16(node.Attributes["Id"].Value.Replace("0x", ""), 16),
+                    OffsetX = short.Parse(node.Attributes["X"].Value),
+                    OffsetY = short.Parse(node.Attributes["Y"].Value),
+                    OffsetZ = short.Parse(node.Attributes["Z"].Value),
+                    Flags = int.Parse(node.Attributes["Flags"].Value)
+                });
+            }
+
+            _workingTiles = newTiles;
+            _hiddenComponentIndices.Clear();
+
+            foreach (XmlNode node in doc.SelectNodes("/MultiComponentSettings/Hidden/Index"))
+            {
+                _hiddenComponentIndices.Add(int.Parse(node.InnerText));
+            }
+
+            PopulateComponentToggleList();
+            MultiPictureBox.Invalidate();
+        }
+        #endregion
+
+        #region [ SaveWorkingTilesToId and SaveAsIdButton_Click ] // Saves the current working tiles to a specified multi ID.
+        private void SaveWorkingTilesToId(int targetId)
+        {
+            // Kopie übergeben, der Ctor leert die übergebene Liste!
+            var newMulti = new MultiComponentList(new List<MultiComponentList.MultiTileEntry>(_workingTiles));
+
+            Multis.Add(targetId, newMulti);
+            Options.ChangedUltimaClass["Multis"] = true;
+
+            ControlEvents.FireMultiChangeEvent(this, targetId);
+
+            MessageBox.Show($"Als Multi 0x{targetId:X} gespeichert.", "Gespeichert",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        #endregion
+
+        #region [ SaveAsIdButton_Click ] // Handles the click event for saving the current working tiles to a specified multi ID.
+        private void SaveAsIdButton_Click(object sender, EventArgs e)
+        {
+            if (!int.TryParse(targetIdTextBox.Text, out int targetId) || targetId < 0 || targetId >= Multis.MaximumMultiIndex)
+            {
+                MessageBox.Show("Ungültige Ziel-ID.", "Fehler", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            SaveWorkingTilesToId(targetId);
+        }
+        #endregion
+
+        #region [ openingToolStripMenuItem_Click and ToggleComponentVisibility_Click ] // Handles the opening of the component toggle form and toggling component visibility.
         private void openingToolStripMenuItem_Click(object sender, EventArgs e)
         {
             if (TreeViewMulti.SelectedNode == null)
@@ -1816,19 +2360,20 @@ namespace UoFiddler.Controls.UserControls
                 CreateComponentToggleForm();
             }
 
-            PopulateComponentToggleList(multi);
+            _sourceMultiId = int.Parse(TreeViewMulti.SelectedNode.Name);
+            _workingTiles = multi.SortedTiles.ToList(); // Heads up! The MultiComponentList(List<>) constructor clears the passed list.
 
-            if (firstShow)
-            {
-                // Erstes Öffnen: rechts neben dem Bild positionieren, nicht drüber
-                Point anchor = MultiPictureBox.PointToScreen(new Point(MultiPictureBox.Width + 4, 0));
-                _componentToggleForm.Location = anchor;
-            }
+            PopulateComponentToggleList();
+            targetIdTextBox.Text = _sourceMultiId.ToString(); // Default target ID = current multi (overwrite); can be changed.
+
+           
 
             _componentToggleForm.Show(FindForm());
             _componentToggleForm.BringToFront();
         }
+        #endregion
 
+        #region [ ToggleComponentVisibility_Click ] // Toggles the visibility of a component based on the menu item click.
         private void ToggleComponentVisibility_Click(object sender, EventArgs e)
         {
             if (!(sender is ToolStripMenuItem item) || !(item.Tag is int index))
@@ -1843,6 +2388,154 @@ namespace UoFiddler.Controls.UserControls
 
             item.Checked = !_hiddenComponentIndices.Contains(index);
             MultiPictureBox.Invalidate();
+        }
+        #endregion
+
+        #region [ RenderMultiImage ] // Render the multi image with hidden components considered
+        private Bitmap RenderMultiImage(IReadOnlyList<MultiComponentList.MultiTileEntry> tiles, int maximumHeight)
+        {
+            if (tiles == null || tiles.Count == 0)
+            {
+                return null;
+            }
+
+            var bitmaps = new Bitmap[tiles.Count];
+            int xMin = 1000, yMin = 1000, xMax = -1000, yMax = -1000;
+
+            for (int i = 0; i < tiles.Count; ++i)
+            {
+                var entry = tiles[i];
+                Bitmap bmp = Art.GetStatic(entry.ItemId);
+                bitmaps[i] = bmp;
+                if (bmp == null)
+                {
+                    continue;
+                }
+
+                int px = (entry.OffsetX - entry.OffsetY) * 22 - bmp.Width / 2;
+                int py = (entry.OffsetX + entry.OffsetY) * 22 - (entry.OffsetZ << 2) - bmp.Height;
+
+                if (px < xMin) xMin = px;
+                if (py < yMin) yMin = py;
+
+                px += bmp.Width;
+                py += bmp.Height;
+
+                if (px > xMax) xMax = px;
+                if (py > yMax) yMax = py;
+            }
+
+            if (xMax <= xMin || yMax <= yMin)
+            {
+                return null;
+            }
+
+            var canvas = new Bitmap(xMax - xMin, yMax - yMin);
+            using (Graphics gfx = Graphics.FromImage(canvas))
+            {
+                gfx.Clear(Color.Transparent);
+
+                int[] drawOrder = BuildDrawOrder(tiles);
+
+                foreach (int i in drawOrder)
+                {
+                    if (_hiddenComponentIndices.Contains(i))
+                    {
+                        continue;
+                    }
+
+                    var entry = tiles[i];
+                    if (entry.OffsetZ > maximumHeight || bitmaps[i] == null)
+                    {
+                        continue;
+                    }
+
+                    Bitmap bmp = bitmaps[i];
+                    int px = (entry.OffsetX - entry.OffsetY) * 22 - bmp.Width / 2 - xMin;
+                    int py = (entry.OffsetX + entry.OffsetY) * 22 - (entry.OffsetZ << 2) - bmp.Height - yMin;
+
+                    gfx.DrawImageUnscaled(bmp, px, py, bmp.Width, bmp.Height);
+                }
+            }
+
+            return canvas;
+        }
+        #endregion
+
+        #region [ ExportSettingsButton_Click and ImportSettingsButton_Click ] // Handles exporting and importing component settings to/from XML files.
+        private void ExportSettingsButton_Click(object sender, EventArgs e)
+        {
+            using (var dialog = new SaveFileDialog { Filter = "XML-Datei|*.xml", FileName = $"Multi_0x{_sourceMultiId:X}_Components.xml" })
+            {
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    ExportComponentSettings(dialog.FileName);
+                }
+            }
+        }
+
+        private void ImportSettingsButton_Click(object sender, EventArgs e)
+        {
+            using (var dialog = new OpenFileDialog { Filter = "XML-Datei|*.xml" })
+            {
+                if (dialog.ShowDialog() == DialogResult.OK)
+                {
+                    ImportComponentSettings(dialog.FileName);
+                }
+            }
+        }
+        #endregion
+
+        #region [ BuildDrawOrder and CompareDrawOrder ] // Determines the order in which tiles should be drawn based on their offsets and properties.
+        private static int[] BuildDrawOrder(IReadOnlyList<MultiComponentList.MultiTileEntry> tiles)
+        {
+            // Grouped by cell (OffsetX/OffsetY) so that multiple graphics at the same position
+            // are drawn stacked in the same order as in the original renderer.
+            var buckets = new Dictionary<(short, short), List<int>>();
+
+            for (int i = 0; i < tiles.Count; ++i)
+            {
+                var key = (tiles[i].OffsetX, tiles[i].OffsetY);
+                if (!buckets.TryGetValue(key, out var list))
+                {
+                    list = new List<int>();
+                    buckets[key] = list;
+                }
+                list.Add(i);
+            }
+
+            var order = new List<int>(tiles.Count);
+
+            foreach (var group in buckets.OrderBy(g => g.Key.Item1).ThenBy(g => g.Key.Item2))
+            {
+                var indices = group.Value;
+                if (indices.Count > 1)
+                {
+                    indices.Sort((a, b) => CompareDrawOrder(tiles[a], a, tiles[b], b));
+                }
+                order.AddRange(indices);
+            }
+
+            return order.ToArray();
+        }
+
+        private static int CompareDrawOrder(MultiComponentList.MultiTileEntry a, int aIndex, MultiComponentList.MultiTileEntry b, int bIndex)
+        {            
+            ItemData da = TileData.ItemTable[a.ItemId];
+            ItemData db = TileData.ItemTable[b.ItemId];
+
+            int aThreshold = 0;
+            if (da.Height > 0) ++aThreshold;
+            if (!da.Background) ++aThreshold;
+
+            int bThreshold = 0;
+            if (db.Height > 0) ++bThreshold;
+            if (!db.Background) ++bThreshold;
+
+            int res = (a.OffsetZ + aThreshold) - (b.OffsetZ + bThreshold);
+            if (res == 0) res = aThreshold - bThreshold;
+            if (res == 0) res = aIndex - bIndex; // corresponds to "Solver" in the original: original order as a tie-breaker
+            return res;
         }
         #endregion
     }
