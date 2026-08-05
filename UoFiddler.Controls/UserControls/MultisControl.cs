@@ -334,7 +334,6 @@ namespace UoFiddler.Controls.UserControls
                     $"Size: {multi.Width},{multi.Height} MaxHeight: {multi.MaxHeight} MultiRegion: {multi.Min.X},{multi.Min.Y},{multi.Max.X},{multi.Max.Y} Surface: {multi.Surface}";
             }
 
-            // <-- hier einfügen
             if (_componentToggleForm != null && _componentToggleForm.Visible && multi != MultiComponentList.Empty)
             {
                 // Beim Multi-Wechsel muss auch die Arbeitskopie neu geladen werden, sonst zeigt der Editor die alte Multi
