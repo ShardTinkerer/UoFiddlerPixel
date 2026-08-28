@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -8,8 +9,40 @@ namespace Ultima
 {
     public static class Art
     {
+        // ===================================================================================================
+        // RANGE DEFINITION — the single place that defines how many Land tiles and Static/item art entries
+        // this class reserves. Static art is stored right after Land art in the same array, offset by
+        // LandCount (mirrors the legacy Artidx.mul/Art.mul layout, where static index 0 sits at slot 0x4000).
+        //
+        // The defaults below reproduce the legacy client layout exactly (16,384 Land + 65,536 Static =
+        // 81,920 = 0x14000 total), so every existing artidx.mul/art.mul (ML, Stygian Abyss, High Seas) keeps
+        // loading and saving exactly as before — nothing about legacy behavior changes.
+        //
+        // TO EXTEND BEYOND 1,000,000 ENTRIES (this tool's own "Extended" format — not read by a regular
+        // client, only by tools/servers that understand a bigger artidx.mul/art.mul), just raise the two
+        // constants, e.g. for ~1,000,000 total split evenly between Land and Static:
+        //
+        //      public const int LandCount = 500_000;
+        //      public const int StaticCount = 500_000;
+        //
+        // Rules when changing them:
+        //   * Never set LandCount below 0x4000 or StaticCount below 0x10000 — that would truncate legacy
+        //     data on load/save (enforced by ValidateRangeConstants() below, called from the static ctor).
+        //   * These constants only size the in-memory capacity and a freshly-saved artidx.mul/art.mul.
+        //     Loading an existing, smaller legacy file always works — unused extra slots simply stay empty.
+        //   * GetMaxItemId()/IsExtended() decide, purely from the *loaded* file's actual entry count
+        //     (GetIdxLength()), whether legacy (High Seas/Stygian Abyss/ML) or the Extended item-id range
+        //     applies — see GetMaxItemId() below.
+        //   * Static art above 0xFFFF (65535) can only be reached through GetLegalStaticId()/GetStatic()/
+        //     ReplaceStatic()/RemoveStatic()/IsValidStatic()/GetRawStatic() — NOT through GetLegalItemId(),
+        //     which stays ushort-limited on purpose (see comment there).
+        // ===================================================================================================
+        public const int LandCount = 0x4000;   // 16,384 — legacy land-tile range
+        public const int StaticCount = 0x10000; // 65,536 — legacy static/item range
+        public const int TotalCount = LandCount + StaticCount;
+
         private static FileIndex _fileIndex = new FileIndex(
-        "Artidx.mul", "Art.mul", "artLegacyMUL.uop", 0x14000, 4, ".tga", 0x13FDC, false);
+        "Artidx.mul", "Art.mul", "artLegacyMUL.uop", TotalCount, 4, ".tga", 0x13FDC, false);
         private static Bitmap[] _cache;
         private static bool[] _removed;
         private static readonly Dictionary<int, bool> _patched = new Dictionary<int, bool>();
@@ -30,12 +63,37 @@ namespace Ultima
 
         static Art()
         {
-            _cache = new Bitmap[0x14000];
-            _removed = new bool[0x14000];
+            ValidateRangeConstants();
+            _cache = new Bitmap[TotalCount];
+            _removed = new bool[TotalCount];
         }
 
+        // Guards against LandCount/StaticCount being edited below the legacy minimums, which would silently
+        // truncate legacy artidx.mul/art.mul data. Runs once from the static ctor and from Reload().
+        private static void ValidateRangeConstants()
+        {
+            if (LandCount < 0x4000 || StaticCount < 0x10000)
+            {
+                throw new InvalidOperationException(
+                    "Art.LandCount/Art.StaticCount must stay at least at the legacy sizes " +
+                    "(0x4000 Land / 0x10000 Static) so existing artidx.mul/art.mul files keep loading correctly.");
+            }
+        }
+
+        /// <summary>
+        /// Highest legal Static item id for the format that is currently loaded, based on the actual
+        /// entry count found in artidx.mul (GetIdxLength()) — NOT on the LandCount/StaticCount capacity
+        /// defined above. A newly loaded legacy file (ML/Stygian Abyss/High Seas) always resolves to the
+        /// exact same value it always did.
+        /// </summary>
         public static int GetMaxItemId()
         {
+            // Extended (this tool's own >1,000,000-capable format — see RANGE DEFINITION above)
+            if (GetIdxLength() > 0x13FDC)
+            {
+                return StaticCount - 1;
+            }
+
             // High Seas
             if (GetIdxLength() >= 0x13FDC)
             {
@@ -57,6 +115,19 @@ namespace Ultima
             return GetIdxLength() >= 0x13FDC;
         }
 
+        /// <summary>
+        /// True once a loaded artidx.mul has more entries than any regular client format ever produces —
+        /// i.e. it was saved by this tool with LandCount/StaticCount raised above the legacy sizes.
+        /// </summary>
+        public static bool IsExtended()
+        {
+            return GetIdxLength() > 0x13FDC;
+        }
+
+        // Kept ushort on purpose: this method also legalizes ids for the ushort-based map/statics-placement
+        // mul formats (TileMatrix, MultiComponentList, map/statics editors, ...), whose file format itself
+        // stores a UInt16 per tile — those callers cannot use ids above 65535 regardless of what art.mul
+        // supports. For direct art.mul static-art access above 0xFFFF, use GetLegalStaticId() instead.
         public static ushort GetLegalItemId(int itemId, bool checkMaxId = true)
         {
             if (itemId < 0)
@@ -78,6 +149,42 @@ namespace Ultima
             return (ushort)itemId;
         }
 
+        /// <summary>
+        /// Extended (int-based) counterpart of GetLegalItemId(), used internally by GetStatic/ReplaceStatic/
+        /// RemoveStatic/IsValidStatic/GetRawStatic. Supports the full StaticCount range, so static art
+        /// indices above 0xFFFF work once StaticCount is raised above the legacy 0x10000 (see RANGE
+        /// DEFINITION above).
+        /// </summary>
+        public static int GetLegalStaticId(int itemId, bool checkMaxId = true)
+        {
+            if (itemId < 0)
+            {
+                return 0;
+            }
+
+            if (!checkMaxId)
+            {
+                return itemId;
+            }
+
+            int max = GetMaxItemId();
+            return itemId > max ? 0 : itemId;
+        }
+
+        // Normalizes a Land index into [0, LandCount). Legacy code used "index &= 0x3FFF", which only works
+        // because 0x4000 is a power of two; LandCount may not be one once customized (e.g. 500_000), so this
+        // uses a real modulo instead.
+        private static int NormalizeLandIndex(int index)
+        {
+            index %= LandCount;
+            if (index < 0)
+            {
+                index += LandCount;
+            }
+
+            return index;
+        }
+
         public static int GetIdxLength()
         {
             return (int)(_fileIndex.IdxLength / 12);
@@ -88,10 +195,11 @@ namespace Ultima
         /// </summary>
         public static void Reload()
         {
+            ValidateRangeConstants();
             _fileIndex = new FileIndex(
-                "Artidx.mul", "Art.mul", "artLegacyMUL.uop", 0x14000, 4, ".tga", 0x13FDC, false);
-            _cache = new Bitmap[0x14000];
-            _removed = new bool[0x14000];
+                "Artidx.mul", "Art.mul", "artLegacyMUL.uop", TotalCount, 4, ".tga", 0x13FDC, false);
+            _cache = new Bitmap[TotalCount];
+            _removed = new bool[TotalCount];
             _patched.Clear();
             Modified = false;
         }
@@ -103,8 +211,8 @@ namespace Ultima
         /// <param name="bmp"></param>
         public static void ReplaceStatic(int index, Bitmap bmp)
         {
-            index = GetLegalItemId(index);
-            index += 0x4000;
+            index = GetLegalStaticId(index);
+            index += LandCount;
 
             _cache[index] = bmp;
             _removed[index] = false;
@@ -124,7 +232,7 @@ namespace Ultima
         /// <param name="bmp"></param>
         public static void ReplaceLand(int index, Bitmap bmp)
         {
-            index &= 0x3FFF;
+            index = NormalizeLandIndex(index);
             _cache[index] = bmp;
             _removed[index] = false;
 
@@ -142,8 +250,8 @@ namespace Ultima
         /// <param name="index"></param>
         public static void RemoveStatic(int index)
         {
-            index = GetLegalItemId(index);
-            index += 0x4000;
+            index = GetLegalStaticId(index);
+            index += LandCount;
 
             _removed[index] = true;
             Modified = true;
@@ -155,7 +263,7 @@ namespace Ultima
         /// <param name="index"></param>
         public static void RemoveLand(int index)
         {
-            index &= 0x3FFF;
+            index = NormalizeLandIndex(index);
             _removed[index] = true;
             Modified = true;
         }
@@ -167,8 +275,8 @@ namespace Ultima
         /// <returns></returns>
         public static bool IsValidStatic(int index)
         {
-            index = GetLegalItemId(index);
-            index += 0x4000;
+            index = GetLegalStaticId(index);
+            index += LandCount;
 
             if (_removed[index])
             {
@@ -203,7 +311,7 @@ namespace Ultima
         /// <returns></returns>
         public static bool IsValidLand(int index)
         {
-            index &= 0x3FFF;
+            index = NormalizeLandIndex(index);
             if (_removed[index])
             {
                 return false;
@@ -235,7 +343,7 @@ namespace Ultima
         /// <returns></returns>
         public static Bitmap GetLand(int index, out bool patched)
         {
-            index &= 0x3FFF;
+            index = NormalizeLandIndex(index);
             patched = _patched.ContainsKey(index) && _patched[index];
 
             if (_removed[index])
@@ -270,7 +378,7 @@ namespace Ultima
         // ReSharper disable once UnusedMember.Global
         public static byte[] GetRawLand(int index)
         {
-            index &= 0x3FFF;
+            index = NormalizeLandIndex(index);
 
             Stream stream = _fileIndex.Seek(index, out int length, out int _, out bool _);
             if (stream == null)
@@ -304,8 +412,8 @@ namespace Ultima
         /// <returns></returns>
         public static Bitmap GetStatic(int index, out bool patched, bool checkMaxId = true)
         {
-            index = GetLegalItemId(index, checkMaxId);
-            index += 0x4000;
+            index = GetLegalStaticId(index, checkMaxId);
+            index += LandCount;
 
             patched = _patched.ContainsKey(index) && _patched[index];
 
@@ -341,8 +449,8 @@ namespace Ultima
         // ReSharper disable once UnusedMember.Global
         public static byte[] GetRawStatic(int index)
         {
-            index = GetLegalItemId(index);
-            index += 0x4000;
+            index = GetLegalStaticId(index);
+            index += LandCount;
 
             Stream stream = _fileIndex.Seek(index, out int length, out int _, out bool _);
             if (stream == null)
@@ -554,11 +662,35 @@ namespace Ultima
         }
 
         /// <summary>
-        /// Saves mul
+        /// Saves artidx.mul/art.mul, writing exactly as many entries as are currently loaded
+        /// (GetIdxLength()) — identical to the historical behavior. To force-write the full Extended
+        /// capacity (e.g. when creating a brand new file that uses all of LandCount/StaticCount), use the
+        /// <see cref="Save(string, int)"/> overload with entryCount: TotalCount.
         /// </summary>
         /// <param name="path"></param>
-        public static unsafe void Save(string path)
+        public static void Save(string path)
         {
+            Save(path, GetIdxLength());
+        }
+
+        /// <summary>
+        /// Saves artidx.mul/art.mul, writing exactly <paramref name="entryCount"/> index slots. Pass
+        /// Art.TotalCount (or any custom count up to it, e.g. LandCount + 500_000) to write beyond the
+        /// legacy 0x14000 entries — see RANGE DEFINITION at the top of this class for how to raise
+        /// LandCount/StaticCount first.
+        /// </summary>
+        /// <param name="path"></param>
+        /// <param name="entryCount"></param>
+        public static unsafe void Save(string path, int entryCount)
+        {
+            if (entryCount < 0 || entryCount > TotalCount)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(entryCount),
+                    entryCount,
+                    $"Must be between 0 and TotalCount ({TotalCount}). Raise LandCount/StaticCount first if you need to save more entries.");
+            }
+
             _landImageData = new List<ImageData>();
             _staticImageData = new List<ImageData>();
 
@@ -574,18 +706,18 @@ namespace Ultima
                 using (var binidx = new BinaryWriter(memidx))
                 using (var binmul = new BinaryWriter(memmul))
                 {
-                    for (int index = 0; index < GetIdxLength(); index++)
+                    for (int index = 0; index < entryCount; index++)
                     {
                         Files.FireFileSaveEvent();
                         if (_cache[index] == null)
                         {
-                            if (index < 0x4000)
+                            if (index < LandCount)
                             {
                                 _cache[index] = GetLand(index);
                             }
                             else
                             {
-                                _cache[index] = GetStatic(index - 0x4000, false);
+                                _cache[index] = GetStatic(index - LandCount, false);
                             }
                         }
 
@@ -596,7 +728,7 @@ namespace Ultima
                             binidx.Write(0);  // Length
                             binidx.Write(-1); // extra
                         }
-                        else if (index < 0x4000)
+                        else if (index < LandCount)
                         {
                             byte[] imageData = bmp.ToArray(PixelFormat.Format16bppArgb1555).ToSha256();
                             if (CompareSaveImagesLand(imageData, out ImageData resultImageData))
